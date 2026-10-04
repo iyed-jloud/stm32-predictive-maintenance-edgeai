@@ -158,4 +158,109 @@ low-confidence, ambiguous classification during transient states.
   20x4 I2C LCD, with automatic I2C bus recovery on communication failure.
 - **Watchdog Task**: lightweight monitoring loop (no hardware IWDG currently active).
 
+## 4. Data Science & AI Model
+
+### Dataset
+
+Data was collected directly from the physical motor test bench using the Edge Impulse data 
+acquisition pipeline, with one labeled recording per fault-type/speed combination:
+
+| Fault family | Recorded at |
+|---|---|
+| Normal operation (`vide`) | 70% |
+| Overload (`surcharge`) | 70%, 85%, 100% (`max`) |
+| Overheating (`temprature`) | 70%, 85%, 100% (`max`) |
+| Unexpected power interruption (`OFON`) | 85%, 100% (`max`) |
+| Shaft misalignment (`coax` / `coaxiale`) | 70%, 85%, 100% (`max`) |
+
+This produced **12 fine-grained training labels** (one per recording) rather than 5 abstract 
+classes — a deliberate choice to preserve as much training signal as possible from a small, 
+manually-acquired dataset. At inference time, the firmware deterministically maps these 12 
+raw labels back to 5 operator-facing states (see Section 3) by matching the fault-family 
+substring in the label name.
+
+- **Total data collected:** 49m 15s raw (40m 28s used for training)
+- **Train / test split:** 12 / 3 samples (82% / 18%)
+- **Generated training windows:** 4,839
+
+### Signal processing pipeline
+
+Two different feature-extraction strategies are applied depending on the nature of each 
+signal, rather than running one generic DSP block across all six channels:
+
+| Signal type | Channels | Block | Features extracted |
+|---|---|---|---|
+| Slow-varying electrical / thermal | Tension_V, Courant_A, Temperature_C | **Flatten** | Average, min, max, RMS, standard deviation, skewness, kurtosis |
+| High-frequency mechanical | Vibration_X, Vibration_Y, Vibration_Z | **Spectral Analysis** | FFT (length 128, log spectrum, overlapping frames) |
+
+- **Window size:** 1000 ms, **stride:** 500 ms, **sampling frequency:** 100 Hz
+- Features are normalized using scikit-learn's `StandardScaler` before training
+
+Feature importance analysis (computed by Edge Impulse over the full training set) ranks 
+**Courant_A Average** and **Tension_V Average** as the two most discriminative features 
+overall — the electrical signature of the motor carries more separating power than vibration 
+alone for most fault types, while **Vibration_X Kurtosis** and **Vibration_Z RMS** are the 
+strongest indicators within the vibration feature set specifically (relevant for the 
+coaxiality/misalignment fault).
+
+### Model architecture
+
+A fully-connected (dense) neural network was chosen over a convolutional architecture, after 
+iterating through several configurations:
+Dense(512, relu) → Dropout(0.4)
+→ Dense(256, relu) → Dropout(0.3)
+→ Dense(128, relu) → Dropout(0.2)
+→ Dense(64, relu) → Dropout(0.1)
+→ Dense(32, relu)
+→ Dense(12, softmax)
+
+
+- **Optimizer:** Adam (learning rate 1e-4, β1=0.9, β2=0.999)
+- **Loss:** categorical cross-entropy
+- **Batch size:** 32, up to 500 epochs
+- **Class imbalance** handled via computed class weights (inversely proportional to class 
+  frequency)
+- **Regularization:** `ReduceLROnPlateau` (factor 0.5, patience 15) and `EarlyStopping` 
+  (patience 35, best-weights restoration)
+
+An earlier iteration of this architecture reached 84.5% accuracy / 0.39 loss; after further 
+tuning of the class-weighting strategy, the final retrained model reached the results below.
+
+### Final performance (validation set)
+
+| Metric | Value |
+|---|---|
+| Accuracy | **87.0%** |
+| Loss | 0.40 |
+| Weighted precision | 0.87 |
+| Weighted recall | 0.87 |
+| Weighted F1-score | 0.87 |
+| AUC-ROC | 0.99 |
+
+Per-class F1-scores range from 0.75 (`OFON_85`, the hardest class to separate) to 0.95 
+(`temprature_85`), with most fault classes above 0.83 — the full confusion matrix is kept in 
+the project's Edge Impulse workspace for reference.
+
+### Deployment
+
+The trained impulse is exported as a **portable C++ library** (no external dependencies) 
+and compiled into the firmware through Edge Impulse's `EON™ Compiler`, with the **INT8 
+quantized** model variant selected over float32 — same accuracy class, with 52% less RAM and 
+35% less flash usage.
+
+| | Quantized (INT8) — deployed | Unoptimized (float32) |
+|---|---|---|
+| Classifier latency | 5 ms | 30 ms |
+| Peak RAM | 5.7 KB | 5.7 KB |
+| Flash footprint | 302.6 KB | 1.1 MB |
+
+> These figures are Edge Impulse's benchmark on a generic Cortex-M4F reference target 
+> (80 MHz). The STM32F407 Discovery's Cortex-M4F core runs at up to 168 MHz, so real on-device 
+> latency is expected to be at or below these numbers.
+
+A secondary **GMM-based anomaly detection block** (12 components, trained on current and 
+voltage averages) was also explored in Edge Impulse as an unsupervised complement to the 
+classifier, but is not currently invoked by the firmware, which relies solely on the 
+supervised classifier's output.
+
 
