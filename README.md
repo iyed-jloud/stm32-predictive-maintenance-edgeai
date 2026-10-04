@@ -113,6 +113,47 @@ flowchart LR
   above a 0.80 confidence threshold.
 - **Communication Task**: streams calibrated readings and diagnostics over UART (USART2) to 
   an ESP32 WROOM module, protected by a mutex with native priority inheritance.
+
+## 3. What the system detects
+
+The system continuously monitors a DC motor driven through the H-bridge stage described above, 
+currently configured at **70% of maximum voltage** (PWM duty cycle, validated across three 
+motor speeds — 100%, 85%, and 70% of Vmax — during dataset acquisition and testing).
+
+Two separate decision layers are deliberately kept apart:
+
+- **Motor state (ON/OFF)** is a simple deterministic rule, not inferred by the AI: voltage 
+  above 5.0 V means running, below 2.0 V for a confirmed 3-second window means stopped. 
+  This hysteresis avoids false stop/start detection from voltage ripple.
+- **Fault classification** among five operating states is handled by an on-device neural 
+  network (Edge Impulse), triggered only while the motor is confirmed running.
+
+### Operating states
+
+| State (raw model label) | Displayed as | What it represents |
+|---|---|---|
+| `vide` | **Normal operation** | Motor running within expected electrical and mechanical range |
+| `surcharge` | **Overload** | Abnormal current/torque draw beyond nominal operating range |
+| `*tem*` | **Overheating** | Motor temperature drift beyond expected thermal profile |
+| `OFON` | **Unexpected power interruption** | Unplanned ON/OFF power cut detected mid-operation |
+| `coax` | **Shaft misalignment (coaxiality fault)** | Vibration signature consistent with a misaligned shaft |
+
+### Detection pipeline
+
+1. Six channels (voltage, current, temperature, and 3-axis vibration) are sampled every 
+   **6 ms** by the Fast Acquisition task.
+2. Samples accumulate into a **600-value inference window** (100 packets × 6 channels ≈ 
+   600 ms of real motor behavior).
+3. Once full, the window is handed to the Edge Impulse classifier (`run_classifier`), which 
+   returns a probability for each of the 5 classes.
+4. The highest-probability class is selected as the current prediction.
+5. If that prediction is **not** "normal operation" **and** its confidence is **≥ 80%**, a 
+   critical-anomaly flag is raised immediately to the Communication task, which broadcasts 
+   a formatted alert over UART and updates the LCD with a short fault label.
+
+This two-threshold design (confidence gate + motor-running gate) was a deliberate choice to 
+avoid two failure modes: reacting to noise while the motor is off, and reacting to a 
+low-confidence, ambiguous classification during transient states.
 - **LCD Display Task**: shows motor state, live sensor values, and short fault labels on a 
   20x4 I2C LCD, with automatic I2C bus recovery on communication failure.
 - **Watchdog Task**: lightweight monitoring loop (no hardware IWDG currently active).
