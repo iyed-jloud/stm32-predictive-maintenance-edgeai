@@ -67,8 +67,13 @@ vcpkg_installed/
 Testing/
 .cache/
 
-# Fichiers specifiques STM32CubeIDE / Eclipse
+# Fichiers et dossiers generes par STM32CubeIDE
 Debug/
 Release/
 .settings/
-*.launch
+*.elf
+*.map
+*.list
+objects.list
+objects.mk
+sources.mk  
